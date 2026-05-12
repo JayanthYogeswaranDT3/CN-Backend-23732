@@ -21,7 +21,9 @@ class CareerPath(Base, UUIDPrimaryKeyMixin, TimestampAuditMixin):
 
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    # NOTE: "metadata" is a reserved attribute name in SQLAlchemy Declarative (Base.metadata).
+    # Keep the database column name as "metadata", but use a different Python attribute name.
+    extra_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column("metadata", JSONB, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
 
     skills = relationship("CareerPathSkill", back_populates="career_path", cascade="all, delete-orphan")
