@@ -4,7 +4,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette import status
 
-from src.api.errors.exceptions import ConflictError, NotFoundError, ValidationError
+from src.api.errors.exceptions import (
+    ConflictError,
+    NotFoundError,
+    UnauthorizedError,
+    ValidationError,
+)
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -33,6 +38,14 @@ def install_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content=_error_payload(request, "conflict", str(exc) or "Conflict"),
+        )
+
+    @app.exception_handler(UnauthorizedError)
+    async def unauthorized_handler(request: Request, exc: UnauthorizedError) -> JSONResponse:
+        logger.info("unauthorized", extra={"path": request.url.path})
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=_error_payload(request, "unauthorized", str(exc) or "Unauthorized"),
         )
 
     @app.exception_handler(ValidationError)
