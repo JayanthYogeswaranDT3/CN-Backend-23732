@@ -4,7 +4,7 @@ import asyncio
 import os
 import socket
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import text
 
@@ -16,8 +16,49 @@ _BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
-from src.core.settings import get_settings
-from src.db.session import engine
+from src.core.settings import get_settings  # noqa: E402
+from src.db.session import engine  # noqa: E402
+
+
+def _redact_db_url(url: str) -> str:
+    """Return a redacted form of a DB URL (never logs username/password)."""
+    parts = urlsplit(url)
+
+    # Remove userinfo from netloc: "user:pass@host:port" -> "host:port"
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = netloc.split("@", 1)[1]
+
+    # Remove sensitive query params that sometimes include secrets.
+    # Keep sslmode visible since it's useful for debugging connectivity.
+    if parts.query:
+        safe_pairs: list[tuple[str, str]] = []
+        for kv in parts.query.split("&"):
+            if not kv:
+                continue
+            k = kv.split("=", 1)[0].lower().strip()
+            if k in {"password", "pass", "pwd", "secret", "token", "apikey", "api_key"}:
+                continue
+            safe_pairs.append(tuple(kv.split("=", 1)) if "=" in kv else (kv, ""))
+
+        # Rebuild query in a stable way; avoid importing parse_qsl/urlencode just for logs.
+        query = "&".join([f"{k}={v}" if v != "" else k for k, v in safe_pairs])
+    else:
+        query = ""
+
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
+def _get_authoritative_db_url_source() -> str:
+    """
+    Decide which env var source should be treated as authoritative.
+
+    We explicitly prefer POSTGRES_CONNECTION if set, and only fall back to legacy
+    discrete POSTGRES_* variables when POSTGRES_CONNECTION is empty.
+    """
+    if os.getenv("POSTGRES_CONNECTION", "").strip():
+        return "POSTGRES_CONNECTION"
+    return "legacy POSTGRES_* (fallback)"
 
 
 # PUBLIC_INTERFACE
@@ -25,8 +66,12 @@ def main() -> None:
     """
     Check whether the backend can reach and connect to the configured Postgres database.
 
+    Authoritative config:
+    - If POSTGRES_CONNECTION is set, it is treated as the authoritative DB connection source.
+    - Otherwise, the backend falls back to legacy discrete POSTGRES_* settings.
+
     This script:
-    1) Prints the resolved DB host/port/db/user (never prints password).
+    1) Prints a sanitized (redacted) view of the resolved DB URL details (never prints secrets).
     2) Performs a DNS + TCP reachability probe to host:port.
     3) Executes a lightweight "SELECT 1" using the app's SQLAlchemy async engine.
 
@@ -37,9 +82,14 @@ def main() -> None:
     """
     settings = get_settings()
 
-    # Do not print secrets. Derive host/port/db from the resolved SQLAlchemy URL,
-    # so this script works whether config comes from POSTGRES_CONNECTION or discrete env vars.
-    parts = urlsplit(settings.database_url)
+    # Prefer POSTGRES_CONNECTION as authoritative when set (even though the app's Settings
+    # will already do the right thing). This is for clarity in diagnostics output.
+    source = _get_authoritative_db_url_source()
+    resolved_url = settings.database_url
+    parts = urlsplit(resolved_url)
+
+    print(f"DB config source: {source}")
+    print(f"DB url (redacted): {_redact_db_url(resolved_url)}")
     print(f"DB url scheme: {parts.scheme}")
     print(f"DB host: {parts.hostname}")
     print(f"DB port: {parts.port}")
@@ -51,7 +101,7 @@ def main() -> None:
     # 1) DNS + TCP reachability
     try:
         if not parts.hostname or not parts.port:
-            raise RuntimeError("Could not parse DB host/port from settings.database_url")
+            raise RuntimeError("Could not parse DB host/port from resolved database URL.")
         addrinfo = socket.getaddrinfo(parts.hostname, parts.port, type=socket.SOCK_STREAM)
         # Pick first resolved address
         family, socktype, proto, _, sockaddr = addrinfo[0]
@@ -60,6 +110,7 @@ def main() -> None:
             s.connect(sockaddr)
         print("Reachability: OK (TCP connect succeeded)")
     except Exception as e:
+        # Never print the raw URL or env vars in error paths.
         print(f"Reachability: FAILED ({type(e).__name__}: {e})")
         raise SystemExit(2) from e
 
@@ -75,7 +126,9 @@ def main() -> None:
     except SystemExit:
         raise
     except Exception as e:
-        print(f"DB query: FAILED ({type(e).__name__}: {e})")
+        # Avoid echoing connection string; SQLAlchemy exceptions can include it in some cases,
+        # but typically do not. We keep the message minimal and type-only for safety.
+        print(f"DB query: FAILED ({type(e).__name__})")
         raise SystemExit(3) from e
 
 
