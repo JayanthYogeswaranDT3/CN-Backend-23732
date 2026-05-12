@@ -30,7 +30,6 @@ def _redact_db_url(url: str) -> str:
         netloc = netloc.split("@", 1)[1]
 
     # Remove sensitive query params that sometimes include secrets.
-    # Keep sslmode visible since it's useful for debugging connectivity.
     if parts.query:
         safe_pairs: list[tuple[str, str]] = []
         for kv in parts.query.split("&"):
@@ -48,6 +47,7 @@ def _redact_db_url(url: str) -> str:
 
     return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
+
 def _safe_str(v: object) -> str:
     """Return a safe string representation for diagnostics (never raises)."""
     try:
@@ -61,19 +61,6 @@ def _env_has_postgres_connection() -> bool:
     return bool(os.getenv("POSTGRES_CONNECTION", "").strip())
 
 
-def _get_authoritative_db_url_source() -> str:
-    """
-    Decide which env var source should be treated as authoritative.
-
-    We explicitly prefer POSTGRES_CONNECTION if set, and only fall back to legacy
-    discrete POSTGRES_* variables when POSTGRES_CONNECTION is empty.
-    """
-    if _env_has_postgres_connection():
-        return "POSTGRES_CONNECTION"
-    # Keep wording generic to avoid leaking/mentioning legacy/Supabase specifics in logs.
-    return "fallback discrete POSTGRES_* (POSTGRES_CONNECTION not set)"
-
-
 def _infer_port(parts) -> int | None:
     """
     Infer the port from a parsed DB URL.
@@ -83,7 +70,6 @@ def _infer_port(parts) -> int | None:
     """
     if parts.port is not None:
         return parts.port
-    # Only default when a hostname is present; otherwise parsing failed.
     if parts.hostname:
         return 5432
     return None
@@ -97,9 +83,26 @@ def _resolve_db_url_for_script(settings) -> tuple[str, str]:
     match the user's expectation even if other env vars exist.
     """
     if _env_has_postgres_connection():
-        # Settings.database_url already normalizes to SQLAlchemy asyncpg URL.
+        # Settings.database_url is normalized to SQLAlchemy asyncpg URL and
+        # strips libpq-only query params (e.g. sslmode).
         return settings.database_url, "POSTGRES_CONNECTION"
     return settings.database_url, "fallback discrete POSTGRES_* (POSTGRES_CONNECTION not set)"
+
+
+def _ssl_diagnostics(settings) -> str:
+    """
+    Return a human-readable SSL configuration summary.
+
+    IMPORTANT:
+    - libpq-style query params like `sslmode` are NOT passed to asyncpg.
+    - SSL is configured via SQLAlchemy engine connect_args, derived from POSTGRES_CONNECTION.
+    """
+    try:
+        args = getattr(settings, "database_connect_args", None) or {}
+        ssl_value = args.get("ssl", None)
+        return f"DB SSL: connect_args.ssl={ssl_value!r} (asyncpg-compatible; sslmode query stripped)"
+    except Exception as e:
+        return f"DB SSL: <unknown> ({type(e).__name__}: {_safe_str(e)})"
 
 
 # PUBLIC_INTERFACE
@@ -109,12 +112,13 @@ def main() -> None:
 
     Authoritative config:
     - If POSTGRES_CONNECTION is set, it is treated as the authoritative DB connection source.
-    - Otherwise, the backend falls back to legacy discrete POSTGRES_* settings.
+    - Otherwise, the backend falls back to discrete POSTGRES_* settings.
 
     This script:
     1) Prints a sanitized (redacted) view of the resolved DB URL details (never prints secrets).
-    2) Performs a DNS + TCP reachability probe to host:port.
-    3) Executes a lightweight "SELECT 1" using the app's SQLAlchemy async engine.
+    2) Prints SSL diagnostics (SSL is configured via connect_args; `sslmode` is stripped).
+    3) Performs a DNS + TCP reachability probe to host:port.
+    4) Executes a lightweight "SELECT 1" using the app's SQLAlchemy async engine.
 
     Exit codes:
     - 0: success
@@ -125,11 +129,13 @@ def main() -> None:
 
     resolved_url, source = _resolve_db_url_for_script(settings)
     if not isinstance(resolved_url, str) or not resolved_url.strip():
-        # Fail fast with actionable info rather than letting SQLAlchemy raise TypeError later.
         print("DB config source:", source)
         print("DB url (redacted): <missing/empty>")
         print("ERROR: Resolved database URL is missing or not a string.")
-        print("Hint: set POSTGRES_CONNECTION to your Neon URI (postgresql://USER:PASSWORD@HOST/DB?sslmode=require).")
+        print(
+            "Hint: set POSTGRES_CONNECTION to your Neon URI "
+            "(postgresql://USER:PASSWORD@HOST/DB?sslmode=require)."
+        )
         raise SystemExit(3)
 
     parts = urlsplit(resolved_url)
@@ -142,6 +148,7 @@ def main() -> None:
     print(f"DB host: {_safe_str(parts.hostname)}")
     print(f"DB port: {port}")
     print(f"DB name: {(parts.path or '').lstrip('/')}")
+    print(_ssl_diagnostics(settings))
     # Only show whether creds exist, never the actual values.
     print(f"DB user set: {bool(parts.username or settings.postgres_user)}")
     print(f"DB password set: {bool(parts.password or settings.postgres_password)}")
@@ -151,14 +158,12 @@ def main() -> None:
         if not parts.hostname or not port:
             raise RuntimeError("Could not parse DB host/port from resolved database URL.")
         addrinfo = socket.getaddrinfo(parts.hostname, port, type=socket.SOCK_STREAM)
-        # Pick first resolved address
         family, socktype, proto, _, sockaddr = addrinfo[0]
         with socket.socket(family, socktype, proto) as s:
             s.settimeout(5)
             s.connect(sockaddr)
         print("Reachability: OK (TCP connect succeeded)")
     except Exception as e:
-        # Never print the raw URL or env vars in error paths.
         print(f"Reachability: FAILED ({type(e).__name__}: {e})")
         raise SystemExit(2) from e
 
@@ -174,8 +179,6 @@ def main() -> None:
     except SystemExit:
         raise
     except Exception as e:
-        # Avoid echoing connection string; SQLAlchemy exceptions can include it in some cases,
-        # but typically do not. We keep the message minimal and type-only for safety.
         print(f"DB query: FAILED ({type(e).__name__}: {_safe_str(e)})")
         raise SystemExit(3) from e
 

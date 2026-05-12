@@ -53,43 +53,112 @@ class Settings(BaseSettings):
         """Split allow_origins into a list (FastAPI expects list)."""
         return [o.strip() for o in self.allow_origins.split(",") if o.strip()]
 
+    def _normalize_to_asyncpg_sqlalchemy_scheme(self, raw: str) -> str:
+        """
+        Normalize a raw postgres URI to SQLAlchemy asyncpg scheme.
+
+        Accepts:
+        - postgresql+asyncpg://...
+        - postgresql://...
+        - postgres://...
+
+        Returns:
+            str: URL starting with postgresql+asyncpg:// (or raw if unrecognized).
+        """
+        if raw.startswith("postgresql+asyncpg://"):
+            return raw
+        if raw.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + raw[len("postgresql://") :]
+        if raw.startswith("postgres://"):
+            return "postgresql+asyncpg://" + raw[len("postgres://") :]
+        return raw
+
+    def _split_and_clean_query_params(self, url: str) -> tuple[str, dict[str, str]]:
+        """
+        Remove libpq-only params that asyncpg does not understand from the URL query.
+
+        Neon connection strings often include libpq parameters like:
+        - sslmode=require
+        - channel_binding=require
+
+        asyncpg (used by SQLAlchemy's asyncpg dialect) does NOT accept these as
+        connect kwargs and will raise:
+            TypeError: connect() got an unexpected keyword argument 'sslmode'
+
+        We therefore strip these parameters from the URL and return them separately
+        so we can configure SSL explicitly via connect_args in engine creation.
+
+        Returns:
+            (clean_url, original_query_dict)
+        """
+        parts = urlsplit(url)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+
+        # Strip libpq-only params that should not be passed through SQLAlchemy URL.
+        # Keep the rest (if any) intact.
+        for k in ("sslmode", "channel_binding"):
+            query.pop(k, None)
+
+        clean_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        return clean_url, dict(parse_qsl(parts.query, keep_blank_values=True))
+
     @property
     def database_url(self) -> str:
         """
         SQLAlchemy async URL for Postgres.
 
-        Note: uses asyncpg driver.
+        IMPORTANT:
+        - Uses asyncpg driver.
+        - Must NOT include libpq-only query params (e.g., sslmode, channel_binding),
+          because SQLAlchemy's asyncpg dialect will forward them into asyncpg.connect()
+          causing TypeError.
+        - SSL is configured separately via `database_connect_args`.
         """
         # Prefer a single connection URI if provided (e.g., Neon, managed Postgres).
-        # We normalize it into SQLAlchemy's asyncpg URL form.
         if self.postgres_connection:
             raw = self.postgres_connection.strip()
-
-            # Normalize scheme: allow postgres://, postgresql:// and async variants.
-            # SQLAlchemy async engine needs "postgresql+asyncpg://".
-            if raw.startswith("postgresql+asyncpg://"):
-                url = raw
-            elif raw.startswith("postgresql://"):
-                url = "postgresql+asyncpg://" + raw[len("postgresql://") :]
-            elif raw.startswith("postgres://"):
-                url = "postgresql+asyncpg://" + raw[len("postgres://") :]
-            else:
-                # If user provided something unexpected, leave as-is and let SQLAlchemy raise
-                # a helpful error.
-                url = raw
-
-            # Neon commonly requires SSL. If the URI doesn't specify sslmode, default to require.
-            # (If users need disable/prefer/verify-full they can set it explicitly.)
-            parts = urlsplit(url)
-            query = dict(parse_qsl(parts.query, keep_blank_values=True))
-            query.setdefault("sslmode", "require")
-            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+            normalized = self._normalize_to_asyncpg_sqlalchemy_scheme(raw)
+            clean_url, _ = self._split_and_clean_query_params(normalized)
+            return clean_url
 
         # Fall back to discrete host/port/db/user/password configuration.
         return (
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def database_connect_args(self) -> dict:
+        """
+        Extra connect args for SQLAlchemy engine creation.
+
+        For Neon (and many managed Postgres providers), SSL must be enabled.
+        Because asyncpg does not accept libpq-style `sslmode`, we configure SSL
+        explicitly via `connect_args={"ssl": True}`.
+
+        Decision logic:
+        - If POSTGRES_CONNECTION contains sslmode=require/verify-ca/verify-full,
+          enable SSL.
+        - If POSTGRES_CONNECTION has no sslmode, we still enable SSL by default
+          because managed providers commonly require it.
+        - For local/discrete settings (no POSTGRES_CONNECTION), do not enable SSL
+          by default.
+        """
+        if not self.postgres_connection:
+            return {}
+
+        raw = self.postgres_connection.strip()
+        normalized = self._normalize_to_asyncpg_sqlalchemy_scheme(raw)
+        _, original_query = self._split_and_clean_query_params(normalized)
+
+        sslmode = (original_query.get("sslmode") or "").strip().lower()
+
+        # If sslmode is explicitly disabling SSL, honor it (rare for Neon).
+        if sslmode in {"disable", "allow", "prefer"}:
+            return {}
+
+        # For require/verify-* OR missing sslmode on managed URI -> enable SSL.
+        return {"ssl": True}
 
 
 # PUBLIC_INTERFACE
