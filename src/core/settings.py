@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,6 +26,13 @@ class Settings(BaseSettings):
     docs_enabled: bool = Field(default=True, description="Enable Swagger/ReDoc in this env")
 
     # DB (Postgres)
+    postgres_connection: str | None = Field(
+        default=None,
+        description=(
+            "Optional full Postgres connection URI. Preferred when set. "
+            "Example (Neon): postgresql://USER:PASSWORD@HOST/DB?sslmode=require"
+        ),
+    )
     postgres_host: str = Field(default="localhost", description="PostgreSQL host")
     postgres_port: int = Field(default=5432, description="PostgreSQL port")
     postgres_db: str = Field(default="career_navigator", description="PostgreSQL database name")
@@ -52,6 +60,32 @@ class Settings(BaseSettings):
 
         Note: uses asyncpg driver.
         """
+        # Prefer a single connection URI if provided (e.g., Neon, managed Postgres).
+        # We normalize it into SQLAlchemy's asyncpg URL form.
+        if self.postgres_connection:
+            raw = self.postgres_connection.strip()
+
+            # Normalize scheme: allow postgres://, postgresql:// and async variants.
+            # SQLAlchemy async engine needs "postgresql+asyncpg://".
+            if raw.startswith("postgresql+asyncpg://"):
+                url = raw
+            elif raw.startswith("postgresql://"):
+                url = "postgresql+asyncpg://" + raw[len("postgresql://") :]
+            elif raw.startswith("postgres://"):
+                url = "postgresql+asyncpg://" + raw[len("postgres://") :]
+            else:
+                # If user provided something unexpected, leave as-is and let SQLAlchemy raise
+                # a helpful error.
+                url = raw
+
+            # Neon commonly requires SSL. If the URI doesn't specify sslmode, default to require.
+            # (If users need disable/prefer/verify-full they can set it explicitly.)
+            parts = urlsplit(url)
+            query = dict(parse_qsl(parts.query, keep_blank_values=True))
+            query.setdefault("sslmode", "require")
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+        # Fall back to discrete host/port/db/user/password configuration.
         return (
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"

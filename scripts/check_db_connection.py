@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import sys
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
@@ -36,16 +37,22 @@ def main() -> None:
     """
     settings = get_settings()
 
-    # Do not print secrets
-    print(f"DB host: {settings.postgres_host}")
-    print(f"DB port: {settings.postgres_port}")
-    print(f"DB name: {settings.postgres_db}")
-    print(f"DB user set: {bool(settings.postgres_user)}")
-    print(f"DB password set: {bool(settings.postgres_password)}")
+    # Do not print secrets. Derive host/port/db from the resolved SQLAlchemy URL,
+    # so this script works whether config comes from POSTGRES_CONNECTION or discrete env vars.
+    parts = urlsplit(settings.database_url)
+    print(f"DB url scheme: {parts.scheme}")
+    print(f"DB host: {parts.hostname}")
+    print(f"DB port: {parts.port}")
+    print(f"DB name: {(parts.path or '').lstrip('/')}")
+    # Only show whether creds exist, never the actual values.
+    print(f"DB user set: {bool(parts.username or settings.postgres_user)}")
+    print(f"DB password set: {bool(parts.password or settings.postgres_password)}")
 
     # 1) DNS + TCP reachability
     try:
-        addrinfo = socket.getaddrinfo(settings.postgres_host, settings.postgres_port, type=socket.SOCK_STREAM)
+        if not parts.hostname or not parts.port:
+            raise RuntimeError("Could not parse DB host/port from settings.database_url")
+        addrinfo = socket.getaddrinfo(parts.hostname, parts.port, type=socket.SOCK_STREAM)
         # Pick first resolved address
         family, socktype, proto, _, sockaddr = addrinfo[0]
         with socket.socket(family, socktype, proto) as s:
