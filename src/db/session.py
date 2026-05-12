@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession as _AsyncSession,
     async_sessionmaker,
@@ -41,3 +42,19 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
             raise
         finally:
             await session.close()
+
+
+# PUBLIC_INTERFACE
+async def check_db_connection() -> bool:
+    """
+    Lightweight DB connectivity check.
+
+    Returns:
+        bool: True if a simple SELECT succeeds, otherwise False.
+    """
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
