@@ -49,6 +49,11 @@ def _redact_db_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
+def _env_has_postgres_connection() -> bool:
+    """Return True if POSTGRES_CONNECTION is present and non-empty in the environment."""
+    return bool(os.getenv("POSTGRES_CONNECTION", "").strip())
+
+
 def _get_authoritative_db_url_source() -> str:
     """
     Decide which env var source should be treated as authoritative.
@@ -56,9 +61,25 @@ def _get_authoritative_db_url_source() -> str:
     We explicitly prefer POSTGRES_CONNECTION if set, and only fall back to legacy
     discrete POSTGRES_* variables when POSTGRES_CONNECTION is empty.
     """
-    if os.getenv("POSTGRES_CONNECTION", "").strip():
+    if _env_has_postgres_connection():
         return "POSTGRES_CONNECTION"
-    return "legacy POSTGRES_* (fallback)"
+    # Keep wording generic to avoid leaking/mentioning legacy/Supabase specifics in logs.
+    return "fallback discrete POSTGRES_* (POSTGRES_CONNECTION not set)"
+
+
+def _infer_port(parts) -> int | None:
+    """
+    Infer the port from a parsed DB URL.
+
+    Some managed Postgres providers (including Neon) commonly omit the explicit port
+    in the URI; in that case Postgres defaults to 5432.
+    """
+    if parts.port is not None:
+        return parts.port
+    # Only default when a hostname is present; otherwise parsing failed.
+    if parts.hostname:
+        return 5432
+    return None
 
 
 # PUBLIC_INTERFACE
@@ -87,12 +108,13 @@ def main() -> None:
     source = _get_authoritative_db_url_source()
     resolved_url = settings.database_url
     parts = urlsplit(resolved_url)
+    port = _infer_port(parts)
 
     print(f"DB config source: {source}")
     print(f"DB url (redacted): {_redact_db_url(resolved_url)}")
     print(f"DB url scheme: {parts.scheme}")
     print(f"DB host: {parts.hostname}")
-    print(f"DB port: {parts.port}")
+    print(f"DB port: {port}")
     print(f"DB name: {(parts.path or '').lstrip('/')}")
     # Only show whether creds exist, never the actual values.
     print(f"DB user set: {bool(parts.username or settings.postgres_user)}")
@@ -100,9 +122,9 @@ def main() -> None:
 
     # 1) DNS + TCP reachability
     try:
-        if not parts.hostname or not parts.port:
+        if not parts.hostname or not port:
             raise RuntimeError("Could not parse DB host/port from resolved database URL.")
-        addrinfo = socket.getaddrinfo(parts.hostname, parts.port, type=socket.SOCK_STREAM)
+        addrinfo = socket.getaddrinfo(parts.hostname, port, type=socket.SOCK_STREAM)
         # Pick first resolved address
         family, socktype, proto, _, sockaddr = addrinfo[0]
         with socket.socket(family, socktype, proto) as s:
