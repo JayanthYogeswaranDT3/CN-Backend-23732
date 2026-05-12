@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
+import sys
 
 from sqlalchemy import text
+
+#
+# Ensure `src.*` imports work when running this script directly from any cwd.
+# Without this, users commonly see: ModuleNotFoundError: No module named 'src'
+#
+_BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
 
 from src.core.settings import get_settings
 from src.db.session import engine

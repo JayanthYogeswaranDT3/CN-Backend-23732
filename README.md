@@ -245,7 +245,7 @@ Because feature code is isolated (routes + service + repository), extracting a m
 
 ### Using Docker compose
 ```bash
-cd CN-Backend-23732/backend
+cd CN-Backend-23732
 cp .env.example .env
 make up
 ```
@@ -253,7 +253,7 @@ make up
 ### Without Docker (manual)
 Requires PostgreSQL running and env vars set.
 ```bash
-cd CN-Backend-23732/backend
+cd CN-Backend-23732
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -262,10 +262,91 @@ uvicorn src.api.main:app --reload
 
 ---
 
+## Database connectivity check (local)
+
+Use this when you need to verify your current `.env` Postgres settings (including Supabase) from your machine.
+
+### 1) Ensure your env vars are set
+
+```bash
+cd CN-Backend-23732
+cp .env.example .env
+# Edit .env and set:
+# POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+```
+
+### 2) Create/activate a virtualenv and install deps
+
+```bash
+cd CN-Backend-23732
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3) Run the DB connectivity check script
+
+The script prints resolved host/port/db/user (never prints password), does a TCP reachability probe, then runs `SELECT 1`.
+
+Run it from the backend folder:
+
+```bash
+cd CN-Backend-23732
+python scripts/check_db_connection.py
+```
+
+Or run it from the repo root (also works):
+
+```bash
+python CN-Backend-23732/scripts/check_db_connection.py
+```
+
+### Exit codes
+
+- `0`: success (TCP + `SELECT 1`)
+- `2`: DNS/TCP reachability failed
+- `3`: DB-level failure (auth/SSL/DB error)
+
+## Supabase notes: Errno 101 / IPv4 vs IPv6 / pooler
+
+If you see an error like:
+
+```
+OSError: [Errno 101] Network is unreachable
+```
+
+that is almost always a **network path** problem, not a SQLAlchemy bug.
+
+### Common causes & mitigations
+
+1) **Runtime has no outbound internet / egress is blocked**
+   - Some hosted/container runtimes block outbound access to the public internet.
+   - Mitigation: run the check from a machine/network that can reach Supabase on port `5432`, or use an allowed egress path (VPN/NAT), or move the DB into the same VPC/network as the runtime.
+
+2) **IPv6-first DNS resolution but no IPv6 route**
+   - Some environments resolve `db.<ref>.supabase.co` to IPv6 first, but do not have IPv6 routes, causing `Errno 101`.
+   - Mitigations:
+     - Prefer a network with working IPv6, **or**
+     - Use a Supabase endpoint/hostname that resolves to IPv4 in your environment, **or**
+     - Use the Supabase **connection pooler** endpoint (often works better across restrictive networks).
+
+3) **Use Supabase pooler when you need fewer connections or better compatibility**
+   - If direct connections are unreliable (or you need to reduce connection counts), use Supabase’s pooler endpoint/port as provided in the Supabase dashboard.
+   - When using the pooler, update your `.env` to the pooler `POSTGRES_HOST` and `POSTGRES_PORT` values and rerun the script.
+
+### Which host should I use?
+
+In `.env.example` we recommend the Supabase “Database settings” host (typically `db.<project-ref>.supabase.co`).
+If that host fails in your environment due to network/IPv6 constraints, try the **pooler** host shown in Supabase and re-run:
+
+```bash
+python CN-Backend-23732/scripts/check_db_connection.py
+```
+
 ## Testing
 
 ```bash
-cd CN-Backend-23732/backend
+cd CN-Backend-23732
 make test
 ```
 
