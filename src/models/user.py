@@ -25,7 +25,8 @@ class User(Base):
     persona_profiles = relationship("PersonaProfile", back_populates="user")
     documents = relationship("DocumentSource", back_populates="user")
     questionnaire_responses = relationship("QuestionnaireResponse", back_populates="user")
-    skill_assessment_runs = relationship("SkillAssessmentRun", back_populates="user")
+    # SkillAssessmentRun has multiple FKs to users.id; disambiguate to the "subject user" via user_id.
+    skill_assessment_runs = relationship("SkillAssessmentRun", back_populates="user", foreign_keys="SkillAssessmentRun.user_id")
     career_path_recommendations = relationship("CareerPathRecommendation", back_populates="user")
     career_path_selections = relationship("UserCareerPathSelection", back_populates="user")
     roadmaps = relationship("Roadmap", back_populates="user")

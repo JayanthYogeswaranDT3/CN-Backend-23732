@@ -42,7 +42,8 @@ class SkillAssessmentRun(Base, UUIDPrimaryKeyMixin, TimestampAuditMixin):
         nullable=True,
     )
 
-    user = relationship("User", back_populates="skill_assessment_runs")
+    # There are two FKs to users.id (user_id and created_by). Disambiguate explicitly.
+    user = relationship("User", back_populates="skill_assessment_runs", foreign_keys=[user_id])
     persona = relationship("PersonaProfile")
     questionnaire_response = relationship("QuestionnaireResponse", back_populates="assessment_runs")
     results = relationship("SkillAssessmentSkillResult", back_populates="assessment_run", cascade="all, delete-orphan")
