@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help venv install run dev test lint format up down logs migrate revision dbshell
+.PHONY: help install run dev test lint format migrate revision
 
 help:
 	@echo "Targets:"
@@ -10,8 +10,6 @@ help:
 	@echo "  test      - run tests"
 	@echo "  lint      - run ruff lint"
 	@echo "  format    - run ruff format"
-	@echo "  up/down   - docker compose up/down"
-	@echo "  logs      - docker compose logs -f"
 	@echo "  migrate   - run alembic upgrade head (requires DB)"
 	@echo "  revision  - create alembic revision (requires msg=...)"
 
@@ -33,15 +31,6 @@ lint:
 
 format:
 	ruff format .
-
-up:
-	docker compose up -d --build
-
-down:
-	docker compose down -v
-
-logs:
-	docker compose logs -f
 
 migrate:
 	alembic upgrade head
